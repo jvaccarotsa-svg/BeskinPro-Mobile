@@ -1,0 +1,61 @@
+{
+  "baumann_classification": {
+    "version": "1.0",
+    "decision_policy": "score_threshold",
+    "axes": {
+      "sebo": {
+        "labels": { "0": "D", "1": "O" },
+        "description": "Seca vs Grasa",
+        "threshold": 1,
+        "features": [
+          { "name": "brillo_zona_t", "weight": 2, "source": "vision" },
+          { "name": "poros_dilatados", "weight": 2, "source": "vision" },
+          { "name": "comedones", "weight": 1, "source": "vision" },
+          { "name": "tirantez", "weight": -2, "source": "questionnaire" },
+          { "name": "descamacion", "weight": -1, "source": "vision" }
+        ]
+      },
+      "sensibilidad": {
+        "labels": { "0": "R", "1": "S" },
+        "description": "Resistente vs Sensible",
+        "threshold": 3,
+        "features": [
+          { "name": "ardor_picor", "weight": 3, "source": "questionnaire" },
+          { "name": "eritema", "weight": 2, "source": "vision" },
+          { "name": "reaccion_cosmeticos", "weight": 2, "source": "questionnaire" },
+          { "name": "acne_inflamatorio", "weight": 1, "source": "vision" },
+          { "name": "tewl_elevado", "weight": 1, "source": "sensor" }
+        ]
+      },
+      "pigmentacion": {
+        "labels": { "0": "N", "1": "P" },
+        "description": "No pigmentada vs Pigmentada",
+        "threshold": 3,
+        "features": [
+          { "name": "melasma", "weight": 3, "source": "vision" },
+          { "name": "hiperpigmentacion_postinflamatoria", "weight": 2, "source": "vision" },
+          { "name": "manchas_visibles", "weight": 2, "source": "vision" },
+          { "name": "pigmenta_tras_inflamacion", "weight": 1, "source": "questionnaire" },
+          { "name": "indice_melanina_alto", "weight": 1, "source": "sensor" }
+        ]
+      },
+      "envejecimiento": {
+        "labels": { "0": "T", "1": "W" },
+        "description": "Firme vs Envejecida",
+        "threshold": 4,
+        "features": [
+          { "name": "arrugas_visibles", "weight": 2, "source": "vision" },
+          { "name": "flacidez", "weight": 2, "source": "vision" },
+          { "name": "fotodano", "weight": 2, "source": "vision" },
+          { "name": "edad_mayor_35", "weight": 1, "source": "demographic" },
+          { "name": "exposicion_solar_alta", "weight": 1, "source": "questionnaire" }
+        ]
+      }
+    },
+    "output": {
+      "format": "string",
+      "description": "Codigo Baumann de 4 letras",
+      "example": "OSPW"
+    }
+  }
+}

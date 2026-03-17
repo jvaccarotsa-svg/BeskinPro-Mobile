@@ -2,16 +2,22 @@ export async function POST(req) {
     try {
         const { message, context } = await req.json();
 
-        const systemPrompt = `Eres el asistente experto en dermo-cosmética de BeSkinPro.
-Tu objetivo es ayudar al usuario con dudas sobre su piel, ingredientes (como retinol, vit C) o el método Baumann (los 16 tipos de piel).
+        const systemPrompt = `Eres el experto en dermo-cosmética de BeSkinPro analizando una respuesta al test Baumann.
+Tu objetivo es doble:
+1. Dar una breve respuesta conversacional (1 frase) empatizando con el usuario y diciendo que lo has anotado.
+2. Extraer la intensidad de su respuesta (HIGH, MEDIUM o NONE).
+- HIGH (mucho, siempre, muy visible, sí muy claro, muy reseca)
+- MEDIUM (algo, a veces, un poco, depende)
+- NONE (nada, nunca, no, nunca reacciona)
 
-INSTRUCCIONES:
-1. Responde de forma BREVE (máximo 2 frases).
-2. Usa un tono profesional y amable.
-3. Estamos en una encuesta: ${context}.
-4. Al final añade: "Sigamos con tu diagnóstico..."
+Contexto pregunta: ${context}
+Respuesta del usuario: ${message}
 
-Pregunta: ${message}`;
+IMPORTANTE: Responde ÚNICA Y EXCLUSIVAMENTE con un JSON válido con este formato:
+{
+  "text": "Tu frase de respuesta...",
+  "intent": "HIGH" | "MEDIUM" | "NONE" | null
+}`;
 
         const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
@@ -22,18 +28,33 @@ Pregunta: ${message}`;
             body: JSON.stringify({
                 model: 'llama-3.3-70b-versatile',
                 messages: [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: message }
+                    { role: 'system', content: systemPrompt }
                 ],
-                temperature: 0.5,
+                temperature: 0.1,
                 max_tokens: 150
             })
         });
 
-        const data = await res.json();
-        const text = data.choices?.[0]?.message?.content || "No he podido procesar tu duda, pero podemos seguir.";
+        if (!res.ok) {
+            const errTxt = await res.text();
+            console.error("Groq Auth/API Error:", res.status, errTxt);
+            throw new Error(`Groq API returned ${res.status}`);
+        }
 
-        return new Response(JSON.stringify({ text }), {
+        const dataResponse = await res.json();
+        const content = dataResponse.choices?.[0]?.message?.content || '{}';
+
+        let parsed = { text: "Anotado. Sigamos.", intent: null };
+        try {
+            const match = content.match(/\{[\s\S]*?\}/);
+            if (match) {
+                parsed = JSON.parse(match[0]);
+            }
+        } catch (e) {
+            console.error("Error parsing Groq JSON:", e, "Content was:", content);
+        }
+
+        return new Response(JSON.stringify(parsed), {
             headers: { "Content-Type": "application/json" },
         });
     } catch (error) {

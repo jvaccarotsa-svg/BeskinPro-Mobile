@@ -50,6 +50,8 @@ function DiagnosticoContent() {
     const chatEndRef = useRef(null);
     const micTimeoutRef = useRef(null);
     const activeSessionRef = useRef(0);
+    // Ref to accumulate voice answers — avoids stale React state closure bug
+    const voiceAnswersRef = useRef({});
 
     // --- Manual mode state ---
     const [manualQIdx, setManualQIdx] = useState(0);
@@ -123,7 +125,7 @@ function DiagnosticoContent() {
     // CHATBOT DE VOZ
     // ──────────────────────────────────────────────────────────────────
     function addMessage(role, text, qIdx = null) {
-        setChatMessages(prev => [...prev, { role, text, qIdx, id: Date.now() }]);
+        setChatMessages(prev => [...prev, { role, text, qIdx, id: Date.now() + '-' + Math.random().toString(36).substring(2, 9) }]);
     }
 
     function initChatbot() {
@@ -136,7 +138,26 @@ function DiagnosticoContent() {
         return chatbotRef.current;
     }
 
+    // ── Full reset: clears all survey/analysis state before a new session ──
+    function resetAllState() {
+        setChatMessages([]);
+        setCurrentQIdx(-1);
+        setBotState('idle');
+        setBaumannAnswers({});
+        setSurveyDone(false);
+        setAwaitingConfirm(false);
+        setPendingAnswer(null);
+        setManualQIdx(0);
+        setManualAnswers({});
+        setAnalysisResult(null);
+        setAnalysisError(null);
+        setAnalysisSaved(false);
+        voiceAnswersRef.current = {};
+    }
+
     async function startSurvey() {
+        // Always start from zero
+        resetAllState();
         activeSessionRef.current += 1;
         const bot = initChatbot();
 
@@ -190,7 +211,8 @@ function DiagnosticoContent() {
                 lowTranscript.includes('como se');
 
             if (parsedValue !== null && !containsQuestion) {
-                // Clearly understood answer and no question - proceed
+                // Clearly understood answer and no question — store in ref AND state
+                voiceAnswersRef.current = { ...voiceAnswersRef.current, [q.field]: parsedValue };
                 setBaumannAnswers(prev => ({ ...prev, [q.field]: parsedValue }));
                 await bot.speak('Entendido.');
                 if (activeSessionRef.current !== currentSession) return;
@@ -215,8 +237,24 @@ function DiagnosticoContent() {
                         await bot.speak(data.text);
                         if (activeSessionRef.current !== currentSession) return;
 
-                        if (parsedValue !== null) {
-                            setBaumannAnswers(prev => ({ ...prev, [q.field]: parsedValue }));
+                        let finalValue = parsedValue;
+                        if (finalValue === null && data.intent) {
+                            switch (q.field) {
+                                case 'tirantez': finalValue = data.intent === 'HIGH' ? 8 : (data.intent === 'MEDIUM' ? 4 : 1); break;
+                                case 'brillo_zona_t': finalValue = data.intent === 'HIGH' ? 1 : (data.intent === 'MEDIUM' ? 0.5 : 0); break;
+                                case 'ardor_picor': finalValue = data.intent === 'HIGH' ? 1 : (data.intent === 'MEDIUM' ? 0.5 : 0); break;
+                                case 'manchas_visibles': finalValue = data.intent === 'HIGH' ? 1 : (data.intent === 'MEDIUM' ? 0.5 : 0); break;
+                                case 'arrugas_visibles': finalValue = data.intent === 'HIGH' ? 1 : (data.intent === 'MEDIUM' ? 0.5 : 0); break;
+                                case 'exposicion_solar_alta': finalValue = data.intent === 'HIGH' ? true : false; break;
+                                case 'reaccion_cosmeticos': finalValue = data.intent === 'HIGH' ? 1 : (data.intent === 'MEDIUM' ? 0.5 : 0); break;
+                                case 'descamacion': finalValue = data.intent === 'HIGH' ? -1 : (data.intent === 'MEDIUM' ? -0.5 : 0); break;
+                            }
+                            console.log('[listenForAnswer] AI extracted intent:', data.intent, 'mapped to:', finalValue);
+                        }
+
+                        if (finalValue !== null) {
+                            voiceAnswersRef.current = { ...voiceAnswersRef.current, [q.field]: finalValue };
+                            setBaumannAnswers(prev => ({ ...prev, [q.field]: finalValue }));
                         }
                         // Advance to next question regardless of answer to avoid repetition, as requested by user
                         console.log('[listenForAnswer] AI answered, advancing to next question:', idx + 1);
@@ -227,6 +265,7 @@ function DiagnosticoContent() {
                 } catch (aiErr) {
                     console.error('[listenForAnswer] AI query failed:', aiErr);
                     if (parsedValue !== null) {
+                        voiceAnswersRef.current = { ...voiceAnswersRef.current, [q.field]: parsedValue };
                         setBaumannAnswers(prev => ({ ...prev, [q.field]: parsedValue }));
                     }
                     if (activeSessionRef.current !== currentSession) return;
@@ -260,8 +299,18 @@ function DiagnosticoContent() {
                 return;
             }
 
-            // Transient error — move to next if persistent
-            console.log('[listenForAnswer] Silence or error, advancing to next question.');
+            // Timeout or no speech detected — repeat question
+            if (msg === 'timeout' || msg === 'no_speech_detected') {
+                console.log('[listenForAnswer] Silence or no speech, repeating question.');
+                addMessage('assistant', 'No te he escuchado bien. Repito la pregunta.');
+                await bot.speak('No te he escuchado bien. Repito la pregunta.');
+                if (activeSessionRef.current !== currentSession) return;
+                await askQuestion(idx, bot); // Repeat SAME question index
+                return;
+            }
+
+            // Other transient error — move to next if persistent
+            console.log('[listenForAnswer] Other error, advancing to next question.');
             await bot.speak('Sigamos.');
             if (activeSessionRef.current !== currentSession) return;
             await askQuestion(idx + 1, bot);
@@ -274,7 +323,10 @@ function DiagnosticoContent() {
         activeSessionRef.current += 1;
         setBotState('idle');
         if (micTimeoutRef.current) clearTimeout(micTimeoutRef.current);
-        // Remove future answers if any
+        // Remove future answers from both state and the ref
+        BAUMANN_QUESTIONS.slice(idx).forEach(q => {
+            delete voiceAnswersRef.current[q.field];
+        });
         setBaumannAnswers(prev => {
             const updated = { ...prev };
             BAUMANN_QUESTIONS.slice(idx).forEach(q => delete updated[q.field]);
@@ -282,8 +334,6 @@ function DiagnosticoContent() {
         });
         // Stop current speaking/listening if any
         chatbotRef.current.stop();
-        // Clear messages that might be confusing? Or just scroll to top?
-        // We'll just append a retry indicator
         addMessage('assistant', `De acuerdo, repetimos la pregunta: ${BAUMANN_QUESTIONS[idx].question}`);
         await askQuestion(idx, chatbotRef.current);
     }
@@ -292,8 +342,12 @@ function DiagnosticoContent() {
 
     function finishSurvey(bot) {
         bot.stop();
+        // Flush the ref into state to guarantee all answers are captured
+        // (avoids stale-closure issue where last setState hasn't propagated yet)
+        setBaumannAnswers(voiceAnswersRef.current);
         setSurveyDone(true);
-        const summary = Object.entries(baumannAnswers).map(([k, v]) => `${k}: ${v}`).join(', ');
+        const summary = Object.entries(voiceAnswersRef.current).map(([k, v]) => `${k}: ${v}`).join(', ');
+        console.log('[finishSurvey] Final voice answers:', summary);
         addMessage('assistant', `¡Perfecto! He registrado todas tus respuestas. Ahora puedes proceder al análisis.`);
         bot.speak('Perfecto. He registrado todas tus respuestas. Puedes proceder al análisis.');
     }
@@ -308,11 +362,16 @@ function DiagnosticoContent() {
     // ──────────────────────────────────────────────────────────────────
     function handleManualAnswer(value) {
         const q = BAUMANN_QUESTIONS[manualQIdx];
-        setManualAnswers(prev => ({ ...prev, [q.field]: value }));
+        // Build updated answers including the current answer BEFORE calling setState
+        // so we can pass the complete set to setBaumannAnswers on the last question.
+        const updatedManual = { ...manualAnswers, [q.field]: value };
+        setManualAnswers(updatedManual);
         if (manualQIdx + 1 < BAUMANN_QUESTIONS.length) {
             setManualQIdx(prev => prev + 1);
         } else {
-            setBaumannAnswers(manualAnswers);
+            // Last question — flush complete answers into baumannAnswers
+            setBaumannAnswers(updatedManual);
+            console.log('[handleManualAnswer] Final manual answers:', updatedManual);
             setSurveyDone(true);
         }
     }
@@ -325,8 +384,11 @@ function DiagnosticoContent() {
         setAnalysisError(null);
 
         try {
-            // Merge answers from whichever mode was used
+            // Merge answers — manual answers take priority to cover both modes.
+            // Voice mode: baumannAnswers is set from voiceAnswersRef in finishSurvey.
+            // Manual mode: baumannAnswers is set from updatedManual in handleManualAnswer.
             const allAnswers = { ...baumannAnswers, ...manualAnswers };
+            console.log('[runAnalysis] Input to Baumann engine:', allAnswers);
 
             // Get patient DOB for age calculation
             const { data: patientData } = await supabase.from('patients').select('date_of_birth').eq('id', patientId).single();
@@ -406,8 +468,7 @@ function DiagnosticoContent() {
                     feature_scores: result,
                     standard_photo_url: standardPhotoUrl,
                     uv_photo_url: uvPhotoUrl,
-                    analyzed_at: new Date().toISOString(),
-                    source: 'mobile',
+                    analyzed_at: new Date().toISOString()
                 }]).select().single();
 
                 if (saveError) throw saveError;
@@ -421,7 +482,7 @@ function DiagnosticoContent() {
 
         } catch (err) {
             console.error('Analysis error:', err);
-            setAnalysisError('Hubo un error durante el análisis. Por favor, inténtalo de nuevo.');
+            setAnalysisError(`Hubo un error técnico al guardar en la base de datos: ${err.message || JSON.stringify(err)}`);
         } finally {
             setAnalyzing(false);
         }
@@ -535,7 +596,7 @@ function DiagnosticoContent() {
                         {/* Mode Toggle */}
                         <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
                             {['voice', 'manual'].map(mode => (
-                                <button key={mode} onClick={() => { setChatMode(mode); stopSurvey(); }} style={{
+                                <button key={mode} onClick={() => { setChatMode(mode); stopSurvey(); resetAllState(); }} style={{
                                     flex: 1, padding: '10px', borderRadius: 12, border: `1.5px solid ${chatMode === mode ? 'var(--accent)' : 'var(--border)'}`,
                                     background: chatMode === mode ? 'var(--accent-dim)' : 'var(--bg-card)',
                                     color: chatMode === mode ? 'var(--accent)' : 'var(--text-muted)',
@@ -556,6 +617,7 @@ function DiagnosticoContent() {
                                 onStart={startSurvey}
                                 onStop={stopSurvey}
                                 onRetry={handleRetry}
+                                onReset={resetAllState}
                                 chatEndRef={chatEndRef}
                                 totalQ={BAUMANN_QUESTIONS.length}
                                 micPermission={micPermission}
@@ -564,13 +626,10 @@ function DiagnosticoContent() {
                             <ManualSurveyPanel
                                 questions={BAUMANN_QUESTIONS}
                                 currentIdx={manualQIdx}
-                                answers={manualAnswers}
                                 onAnswer={handleManualAnswer}
                                 onPrev={() => setManualQIdx(i => Math.max(0, i - 1))}
+                                onReset={resetAllState}
                                 surveyDone={surveyDone}
-                                setSurveyDone={setSurveyDone}
-                                setBaumannAnswers={setBaumannAnswers}
-                                manualAnswers={manualAnswers}
                             />
                         )}
 
@@ -608,6 +667,9 @@ function DiagnosticoContent() {
                                         <div style={{ marginTop: 16, padding: '12px 16px', background: 'var(--danger-dim)', border: '1px solid rgba(224,82,82,0.3)', borderRadius: 12, color: 'var(--danger)', fontSize: 13 }}>
                                             <AlertCircle size={14} style={{ display: 'inline', marginRight: 6 }} />
                                             {analysisError}
+                                            <button className="btn btn-outline btn-sm" onClick={() => { setAnalysisError(null); resetAllState(); setActiveTab('encuesta'); }} style={{ marginTop: 12, width: '100%', borderColor: 'var(--danger)', color: 'var(--danger)' }}>
+                                                <RefreshCw size={14} /> Empezar encuesta de nuevo
+                                            </button>
                                         </div>
                                     )}
                                 </div>
@@ -674,24 +736,17 @@ function PhotoCard({ title, subtitle, photo, onCamera, onUpload, onRetake }) {
     );
 }
 
-function VoiceSurveyPanel({ chatMessages, botState, currentQIdx, surveyDone, onStart, onStop, onRetry, chatEndRef, totalQ, micPermission }) {
-    const stateLabels = { idle: 'Listo', speaking: 'Hablando...', listening: 'Escuchando...', processing: 'Procesando...' };
-    const stateColors = { idle: 'var(--text-muted)', speaking: 'var(--accent)', listening: 'var(--danger)', processing: 'var(--warning)' };
+function VoiceSurveyPanel({ chatMessages, botState, currentQIdx, surveyDone, onStart, onStop, onRetry, onReset, chatEndRef, totalQ, micPermission }) {
+    const stateLabels = { idle: 'Listo', speaking: 'Hablando...', preparing: 'Preparando micrófono...', listening: '¡Dinos!', processing: 'Procesando...' };
+    const stateColors = { idle: 'var(--text-muted)', speaking: 'var(--accent)', preparing: 'var(--warning)', listening: 'var(--danger)', processing: 'var(--warning)' };
 
     return (
         <div>
             {/* Status bar */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, padding: '10px 14px', background: 'var(--bg-card)', borderRadius: 14, border: '1px solid var(--border)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    {botState === 'listening' && (
-                        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 20 }}>
-                            {[0, 1, 2, 3, 4].map(i => (
-                                <div key={i} className="wave-bar" style={{ width: 3, height: '100%', background: 'var(--danger)', '--wave-delay': `${i * 0.12}s` }} />
-                            ))}
-                        </div>
-                    )}
                     <span style={{ fontFamily: 'Figtree, sans-serif', fontWeight: 700, fontSize: 13, color: stateColors[botState] || 'var(--text-muted)' }}>
-                        {stateLabels[botState] || 'Listo'}
+                        Estado: {stateLabels[botState] || 'Listo'}
                     </span>
                 </div>
                 {currentQIdx >= 0 && !surveyDone && (
@@ -712,12 +767,25 @@ function VoiceSurveyPanel({ chatMessages, botState, currentQIdx, surveyDone, onS
                 </div>
             )}
 
-            {/* Mic requesting indicator */}
-            {micPermission === 'requesting' && (
-                <div style={{ marginBottom: 16, padding: '14px 16px', background: 'var(--accent-dim)', border: '1px solid var(--accent-border)', borderRadius: 14, textAlign: 'center' }}>
-                    <Mic size={20} color="var(--accent)" style={{ margin: '0 auto 8px' }} />
-                    <p style={{ fontFamily: 'Figtree, sans-serif', fontWeight: 600, fontSize: 14, color: 'var(--accent)' }}>Solicitando permiso de micrófono...</p>
-                    <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Acepta el permiso en la ventana emergente del navegador</p>
+            {/* Huge Active Mic Indicator */}
+            {botState === 'listening' && (
+                <div style={{ marginBottom: 16, padding: '30px 20px', background: 'rgba(224,82,82,0.1)', border: '2px solid var(--danger)', borderRadius: 20, textAlign: 'center', animation: 'pulse 2s infinite' }}>
+                    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, height: 40, marginBottom: 16 }}>
+                        {[0, 1, 2, 3, 4, 5, 6].map(i => (
+                            <div key={i} className="wave-bar" style={{ width: 8, height: '100%', background: 'var(--danger)', '--wave-delay': `${i * 0.12}s`, borderRadius: 4 }} />
+                        ))}
+                    </div>
+                    <h3 style={{ fontFamily: 'Figtree, sans-serif', fontWeight: 800, fontSize: 22, color: 'var(--danger)', margin: 0 }}>
+                        ¡HABLA AHORA!
+                    </h3>
+                    <p style={{ color: 'var(--danger)', opacity: 0.8, fontSize: 14, marginTop: 4 }}>Te estamos escuchando...</p>
+                </div>
+            )}
+
+            {botState === 'preparing' && (
+                <div style={{ marginBottom: 16, padding: '16px', background: 'var(--warning-dim)', border: '1px dashed var(--warning)', borderRadius: 14, textAlign: 'center' }}>
+                    <p style={{ fontFamily: 'Figtree, sans-serif', fontWeight: 600, fontSize: 14, color: 'var(--warning)' }}>Preparando micrófono...</p>
+                    <p style={{ fontSize: 12, color: 'var(--warning)', marginTop: 4 }}>Espera a que el navegador active el dispositivo.</p>
                 </div>
             )}
 
@@ -772,15 +840,20 @@ function VoiceSurveyPanel({ chatMessages, botState, currentQIdx, surveyDone, onS
                     <Mic size={18} /> {micPermission === 'requesting' ? 'Activando micrófono...' : 'Iniciar Encuesta por Voz'}
                 </button>
             ) : (
-                <button className="btn btn-ghost btn-full" onClick={onStop}>
-                    <Pause size={16} /> Pausar
-                </button>
+                <div style={{ display: 'flex', gap: 10 }}>
+                    <button className="btn btn-ghost" onClick={onStop} style={{ flex: 1 }}>
+                        <Pause size={16} /> Pausar
+                    </button>
+                    <button className="btn btn-outline" onClick={onReset} style={{ flex: 1, borderColor: 'var(--danger)', color: 'var(--danger)' }}>
+                        <RefreshCw size={16} /> Reiniciar
+                    </button>
+                </div>
             )}
         </div>
     );
 }
 
-function ManualSurveyPanel({ questions, currentIdx, answers, onAnswer, onPrev, surveyDone, setSurveyDone, setBaumannAnswers, manualAnswers }) {
+function ManualSurveyPanel({ questions, currentIdx, onAnswer, onPrev, surveyDone, onReset }) {
     if (surveyDone) {
         return (
             <div style={{ padding: 24, background: 'var(--success-dim)', borderRadius: 20, border: '1px solid rgba(76,175,136,0.3)', textAlign: 'center' }}>
@@ -803,6 +876,9 @@ function ManualSurveyPanel({ questions, currentIdx, answers, onAnswer, onPrev, s
                 <span style={{ fontFamily: 'Figtree, sans-serif', fontWeight: 700, fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
                     {currentIdx + 1}/{questions.length}
                 </span>
+                <button onClick={onReset} className="btn btn-ghost btn-icon" style={{ padding: 6, gap: 4, height: 'auto', borderRadius: 8, fontSize: 11, color: 'var(--danger)', borderColor: 'rgba(224,82,82,0.3)' }}>
+                    <RefreshCw size={12} /> Reiniciar
+                </button>
             </div>
 
             {/* Question */}
@@ -812,19 +888,11 @@ function ManualSurveyPanel({ questions, currentIdx, answers, onAnswer, onPrev, s
                 </p>
             </div>
 
-            {/* Answer options */}
+            {/* Answer options — always delegate to onAnswer (parent handles last question) */}
             <div className="chip-group" style={{ justifyContent: 'center' }}>
                 {getManualOptions(q.field).map(({ label, value }) => (
                     <button key={label} className="chip" style={{ fontSize: 15, padding: '12px 20px' }}
-                        onClick={() => {
-                            const updatedAnswers = { ...manualAnswers, [q.field]: value };
-                            if (currentIdx + 1 >= questions.length) {
-                                setBaumannAnswers(updatedAnswers);
-                                setSurveyDone(true);
-                            } else {
-                                onAnswer(value);
-                            }
-                        }}
+                        onClick={() => onAnswer(value)}
                     >
                         {label}
                     </button>

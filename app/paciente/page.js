@@ -70,18 +70,24 @@ function PacienteContent() {
         }
         setSaving(true);
         try {
+            const genderMap = {
+                'Mujer': 'F',
+                'Hombre': 'M'
+            };
+            const mappedSex = genderMap[newPatient.gender] || null;
+
             const { data, error } = await supabase.from('patients').insert([{
                 first_name: newPatient.first_name,
                 last_name: newPatient.last_name,
                 date_of_birth: newPatient.date_of_birth || null,
-                gender: newPatient.gender || null,
+                sex: mappedSex,
                 created_at: new Date().toISOString(),
             }]).select().single();
             if (error) throw error;
             router.push(`/diagnostico?patient_id=${data.id}&patient_name=${encodeURIComponent(data.first_name + ' ' + data.last_name)}`);
         } catch (err) {
             console.error('Error saving patient:', err);
-            alert('Error al guardar el paciente.');
+            alert(`Error al guardar el paciente: ${err?.message || JSON.stringify(err)}`);
         } finally {
             setSaving(false);
         }

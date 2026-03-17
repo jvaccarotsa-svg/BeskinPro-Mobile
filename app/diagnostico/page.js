@@ -200,15 +200,18 @@ function DiagnosticoContent() {
         const currentSession = activeSessionRef.current;
         bot.listen().then(async (transcript) => {
             if (activeSessionRef.current !== currentSession) return;
-            const lowTranscript = transcript.toLowerCase();
             addMessage('user', transcript, idx);
-
+            const trimmedTranscript = transcript.trim().toLowerCase();
             const parsedValue = q.parseResponse(transcript);
-            const containsQuestion = transcript.includes('?') ||
-                lowTranscript.includes('que es') ||
-                lowTranscript.includes('que son') ||
-                lowTranscript.includes('porque') ||
-                lowTranscript.includes('como se');
+
+            // Avoid triggering "containsQuestion" for short strings ending in ? (often just an artifact of STT)
+            const containsQuestion = (trimmedTranscript.length > 4 && transcript.includes('?')) ||
+                trimmedTranscript.includes('que es') ||
+                trimmedTranscript.includes('que son') ||
+                trimmedTranscript.includes('porque') ||
+                trimmedTranscript.includes('como se');
+
+            console.log(`[listenForAnswer] Transcript: "${transcript}", Parsed: ${parsedValue}, IsQuestion: ${containsQuestion}`);
 
             if (parsedValue !== null && !containsQuestion) {
                 // Clearly understood answer and no question — store in ref AND state

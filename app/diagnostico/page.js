@@ -177,22 +177,27 @@ function DiagnosticoContent() {
         await askQuestion(0, bot);
     }
 
-    async function askQuestion(idx, bot) {
+    async function askQuestion(idx, bot, retryCount = 0) {
         if (idx >= BAUMANN_QUESTIONS.length) {
             finishSurvey(bot);
             return;
         }
         setCurrentQIdx(idx);
         const q = BAUMANN_QUESTIONS[idx];
-        addMessage('assistant', q.question, idx);
-        await bot.speak(q.question);
-        console.log('[askQuestion] Spoken. Waiting for mic activation...');
+
+        // Only speak the question if it's the first time or a clean retry
+        if (retryCount === 0) {
+            addMessage('assistant', q.question, idx);
+            await bot.speak(q.question);
+        }
+
+        console.log(`[askQuestion] Q:${idx} retry:${retryCount}. Waiting for mic...`);
         if (micTimeoutRef.current) clearTimeout(micTimeoutRef.current);
-        // Larger delay for mobile OS to release audio output and ready the mic
+
         micTimeoutRef.current = setTimeout(() => {
-            console.log('[askQuestion] Activating mic now for question:', idx);
-            listenForAnswer(idx, bot);
-        }, 800);
+            if (activeSessionRef.current !== activeSessionRef.current) return;
+            listenForAnswer(idx, bot, retryCount);
+        }, retryCount === 0 ? 800 : 400); // Shorter delay if repeating
     }
 
     function listenForAnswer(idx, bot, retryCount = 0) {
@@ -304,11 +309,20 @@ function DiagnosticoContent() {
 
             // Timeout or no speech detected — repeat question
             if (msg === 'timeout' || msg === 'no_speech_detected') {
-                console.log('[listenForAnswer] Silence or no speech, repeating question.');
-                addMessage('assistant', 'No te he escuchado bien. Repito la pregunta.');
-                await bot.speak('No te he escuchado bien. Repito la pregunta.');
-                if (activeSessionRef.current !== currentSession) return;
-                await askQuestion(idx, bot); // Repeat SAME question index
+                const nextRetry = retryCount + 1;
+                if (nextRetry > 2) {
+                    console.log('[listenForAnswer] Too many silences, advancing to avoid loop.');
+                    addMessage('assistant', 'Sigamos con la siguiente pregunta.');
+                    await bot.speak('No te preocupes, sigamos.');
+                    if (activeSessionRef.current !== currentSession) return;
+                    await askQuestion(idx + 1, bot);
+                } else {
+                    console.log(`[listenForAnswer] Silence (retry ${nextRetry}), repeating question.`);
+                    addMessage('assistant', 'No te he escuchado bien. ¿Puedes repetir?');
+                    await bot.speak('No te he escuchado bien. ¿Puedes repetir?');
+                    if (activeSessionRef.current !== currentSession) return;
+                    await askQuestion(idx, bot, nextRetry);
+                }
                 return;
             }
 
